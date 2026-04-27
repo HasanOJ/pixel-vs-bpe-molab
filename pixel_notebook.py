@@ -23,8 +23,8 @@ app = marimo.App(width="medium")
 def _():
     import marimo as mo
     from pathlib import Path
+    import urllib.request
     import sys
-    import types
 
     import matplotlib.pyplot as plt
     import numpy as np
@@ -49,28 +49,65 @@ def _():
         setattr(transformers_factory, "_pixel_safe_patch", True)
 
     notebook_root = Path(__file__).resolve().parent
-    local_pixel_package = notebook_root / "pixel" / "src" / "pixel"
+    runtime_root = notebook_root / "_pixel_runtime"
+    repo_pixel_src = notebook_root / "pixel" / "src"
+    repo_font_path = notebook_root / "pixel" / "configs" / "renderers" / "noto_renderer" / "GoNotoCurrent.ttf"
+    repo_vocab_path = notebook_root / "notebook_assets" / "bert-base-cased-vocab.txt"
 
-    if local_pixel_package.exists():
-        for module_name in list(sys.modules):
-            if module_name == "pixel" or module_name.startswith("pixel."):
-                del sys.modules[module_name]
+    runtime_pixel_src = runtime_root / "pixel" / "src"
+    runtime_font_path = runtime_root / "pixel" / "configs" / "renderers" / "noto_renderer" / "GoNotoCurrent.ttf"
+    runtime_vocab_path = runtime_root / "notebook_assets" / "bert-base-cased-vocab.txt"
 
-        namespace_paths = {
-            "pixel": local_pixel_package,
-            "pixel.data": local_pixel_package / "data",
-            "pixel.data.rendering": local_pixel_package / "data" / "rendering",
-            "pixel.utils": local_pixel_package / "utils",
-        }
-        for module_name, module_path in namespace_paths.items():
-            namespace_module = types.ModuleType(module_name)
-            namespace_module.__path__ = [str(module_path)]
-            sys.modules[module_name] = namespace_module
+    remote_files = {
+        runtime_pixel_src / "pixel" / "data" / "rendering" / "pangocairo_renderer.py":
+            "https://raw.githubusercontent.com/HasanOJ/pixel-vs-bpe-molab/main/pixel/src/pixel/data/rendering/pangocairo_renderer.py",
+        runtime_pixel_src / "pixel" / "data" / "rendering" / "rendering_utils.py":
+            "https://raw.githubusercontent.com/HasanOJ/pixel-vs-bpe-molab/main/pixel/src/pixel/data/rendering/rendering_utils.py",
+        runtime_pixel_src / "pixel" / "utils" / "defaults.py":
+            "https://raw.githubusercontent.com/HasanOJ/pixel-vs-bpe-molab/main/pixel/src/pixel/utils/defaults.py",
+        runtime_font_path:
+            "https://raw.githubusercontent.com/HasanOJ/pixel-vs-bpe-molab/main/pixel/configs/renderers/noto_renderer/GoNotoCurrent.ttf",
+        runtime_vocab_path:
+            "https://raw.githubusercontent.com/HasanOJ/pixel-vs-bpe-molab/main/notebook_assets/bert-base-cased-vocab.txt",
+    }
+
+    def _ensure_file(target_path, url):
+        if target_path.exists():
+            return
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(url) as response:
+            target_path.write_bytes(response.read())
+
+    def _ensure_runtime_bundle():
+        if repo_pixel_src.exists() and repo_font_path.exists() and repo_vocab_path.exists():
+            return repo_pixel_src, repo_font_path, repo_vocab_path, "local repo bundle"
+
+        for target_path, url in remote_files.items():
+            _ensure_file(target_path, url)
+
+        package_dirs = [
+            runtime_pixel_src / "pixel",
+            runtime_pixel_src / "pixel" / "data",
+            runtime_pixel_src / "pixel" / "data" / "rendering",
+            runtime_pixel_src / "pixel" / "utils",
+        ]
+        for package_dir in package_dirs:
+            package_dir.mkdir(parents=True, exist_ok=True)
+            init_file = package_dir / "__init__.py"
+            if not init_file.exists():
+                init_file.write_text("", encoding="utf-8")
+
+        return runtime_pixel_src, runtime_font_path, runtime_vocab_path, "downloaded runtime bundle"
+
+    pixel_src_root, font_path, vocab_path, asset_source = _ensure_runtime_bundle()
+    pixel_src_root_str = str(pixel_src_root)
+    if pixel_src_root_str not in sys.path:
+        sys.path.insert(0, pixel_src_root_str)
 
     from pixel.data.rendering.pangocairo_renderer import PangoCairoTextRenderer
     from transformers import BertTokenizer
 
-    return BertTokenizer, PangoCairoTextRenderer, mo, notebook_root, np, plt
+    return BertTokenizer, PangoCairoTextRenderer, asset_source, font_path, mo, np, plt, vocab_path
 
 
 @app.cell
@@ -138,9 +175,8 @@ def _(mo):
 
 
 @app.cell
-def _(BertTokenizer, PangoCairoTextRenderer, mo, notebook_root):
+def _(BertTokenizer, PangoCairoTextRenderer, asset_source, font_path, mo, vocab_path):
     tokenizer_name = "bert-base-cased (bundled vocab)"
-    vocab_path = notebook_root / "notebook_assets" / "bert-base-cased-vocab.txt"
     if not vocab_path.exists():
         raise FileNotFoundError(
             "Could not locate notebook_assets/bert-base-cased-vocab.txt. "
@@ -148,8 +184,6 @@ def _(BertTokenizer, PangoCairoTextRenderer, mo, notebook_root):
             "downloading tokenizer assets at runtime."
         )
     tokenizer = BertTokenizer(vocab_file=str(vocab_path), do_lower_case=False)
-
-    font_path = (notebook_root / "pixel" / "configs" / "renderers" / "noto_renderer" / "GoNotoCurrent.ttf").resolve()
 
     if not font_path.exists():
         raise FileNotFoundError(
@@ -167,7 +201,7 @@ def _(BertTokenizer, PangoCairoTextRenderer, mo, notebook_root):
             - WordPiece tokenizer: {tokenizer_name}
             - Bundled tokenizer vocab: {vocab_path.name}
             - PIXEL font file: {font_path.name}
-            - PIXEL renderer source: local `pixel/src`
+            - Asset source: {asset_source}
             - Patch size: {renderer.pixels_per_patch} x {renderer.pixels_per_patch} pixels
             """
         ),
