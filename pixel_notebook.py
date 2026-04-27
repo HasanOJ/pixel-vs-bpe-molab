@@ -6,10 +6,6 @@
 #   "matplotlib>=3.9,<4",
 #   "transformers==4.17.0",
 #   "pillow>=10,<13",
-#   "pycairo==1.29.0",
-#   "PyGObject==3.50.0",
-#   "manimpango==0.6.1",
-#   "fonttools>=4.0",
 # ]
 # ///
 
@@ -23,11 +19,13 @@ app = marimo.App(width="medium")
 def _():
     import marimo as mo
     from pathlib import Path
+    import math
+    from types import SimpleNamespace
     import urllib.request
-    import sys
 
     import matplotlib.pyplot as plt
     import numpy as np
+    from PIL import Image, ImageDraw, ImageFont
 
     # marimo 0.23.x registers a transformers formatter that expects
     # TextIteratorStreamer, which is unavailable in transformers 4.17.
@@ -50,21 +48,13 @@ def _():
 
     notebook_root = Path(__file__).resolve().parent
     runtime_root = notebook_root / "_pixel_runtime"
-    repo_pixel_src = notebook_root / "pixel" / "src"
     repo_font_path = notebook_root / "pixel" / "configs" / "renderers" / "noto_renderer" / "GoNotoCurrent.ttf"
     repo_vocab_path = notebook_root / "notebook_assets" / "bert-base-cased-vocab.txt"
 
-    runtime_pixel_src = runtime_root / "pixel" / "src"
-    runtime_font_path = runtime_root / "pixel" / "configs" / "renderers" / "noto_renderer" / "GoNotoCurrent.ttf"
+    runtime_font_path = runtime_root / "GoNotoCurrent.ttf"
     runtime_vocab_path = runtime_root / "notebook_assets" / "bert-base-cased-vocab.txt"
 
     remote_files = {
-        runtime_pixel_src / "pixel" / "data" / "rendering" / "pangocairo_renderer.py":
-            "https://raw.githubusercontent.com/HasanOJ/pixel-vs-bpe-molab/main/pixel/src/pixel/data/rendering/pangocairo_renderer.py",
-        runtime_pixel_src / "pixel" / "data" / "rendering" / "rendering_utils.py":
-            "https://raw.githubusercontent.com/HasanOJ/pixel-vs-bpe-molab/main/pixel/src/pixel/data/rendering/rendering_utils.py",
-        runtime_pixel_src / "pixel" / "utils" / "defaults.py":
-            "https://raw.githubusercontent.com/HasanOJ/pixel-vs-bpe-molab/main/pixel/src/pixel/utils/defaults.py",
         runtime_font_path:
             "https://raw.githubusercontent.com/HasanOJ/pixel-vs-bpe-molab/main/pixel/configs/renderers/noto_renderer/GoNotoCurrent.ttf",
         runtime_vocab_path:
@@ -78,36 +68,49 @@ def _():
         with urllib.request.urlopen(url) as response:
             target_path.write_bytes(response.read())
 
-    def _ensure_runtime_bundle():
-        if repo_pixel_src.exists() and repo_font_path.exists() and repo_vocab_path.exists():
-            return repo_pixel_src, repo_font_path, repo_vocab_path, "local repo bundle"
+    def _ensure_assets():
+        if repo_font_path.exists() and repo_vocab_path.exists():
+            return repo_font_path, repo_vocab_path, "local repo bundle"
 
         for target_path, url in remote_files.items():
             _ensure_file(target_path, url)
 
-        package_dirs = [
-            runtime_pixel_src / "pixel",
-            runtime_pixel_src / "pixel" / "data",
-            runtime_pixel_src / "pixel" / "data" / "rendering",
-            runtime_pixel_src / "pixel" / "utils",
-        ]
-        for package_dir in package_dirs:
-            package_dir.mkdir(parents=True, exist_ok=True)
-            init_file = package_dir / "__init__.py"
-            if not init_file.exists():
-                init_file.write_text("", encoding="utf-8")
+        return runtime_font_path, runtime_vocab_path, "downloaded asset bundle"
 
-        return runtime_pixel_src, runtime_font_path, runtime_vocab_path, "downloaded runtime bundle"
+    class SimplePixelRenderer:
+        def __init__(self, font_file, pixels_per_patch=16, max_seq_length=529, font_size=14):
+            self.font_file = str(font_file)
+            self.pixels_per_patch = pixels_per_patch
+            self.max_seq_length = max_seq_length
+            self.font_size = font_size
+            self.canvas_width = pixels_per_patch * max_seq_length
+            self.canvas_height = pixels_per_patch
+            self.font = ImageFont.truetype(self.font_file, size=self.font_size)
 
-    pixel_src_root, font_path, vocab_path, asset_source = _ensure_runtime_bundle()
-    pixel_src_root_str = str(pixel_src_root)
-    if pixel_src_root_str not in sys.path:
-        sys.path.insert(0, pixel_src_root_str)
+        def __call__(self, text):
+            normalized = text if text else " "
+            canvas = Image.new("L", (self.canvas_width, self.canvas_height), color=255)
+            draw = ImageDraw.Draw(canvas)
 
-    from pixel.data.rendering.pangocairo_renderer import PangoCairoTextRenderer
+            bbox = draw.textbbox((0, 0), normalized, font=self.font)
+            text_width = max(1, bbox[2] - bbox[0])
+            text_height = max(1, bbox[3] - bbox[1])
+            x_offset = 2
+            y_offset = max(0, (self.canvas_height - text_height) // 2 - bbox[1])
+            draw.text((x_offset, y_offset), normalized, fill=0, font=self.font)
+
+            used_width = min(self.canvas_width, x_offset + text_width + 2)
+            num_text_patches = max(1, math.ceil(used_width / self.pixels_per_patch))
+
+            return SimpleNamespace(
+                pixel_values=np.asarray(canvas, dtype=np.uint8),
+                num_text_patches=num_text_patches,
+            )
+
+    font_path, vocab_path, asset_source = _ensure_assets()
     from transformers import BertTokenizer
 
-    return BertTokenizer, PangoCairoTextRenderer, asset_source, font_path, mo, np, plt, vocab_path
+    return BertTokenizer, SimplePixelRenderer, asset_source, font_path, mo, np, plt, vocab_path
 
 
 @app.cell
@@ -159,7 +162,7 @@ def _(mo):
     directly to typo robustness.
 
     Left panel: subword decomposition from a bundled `bert-base-cased` WordPiece vocabulary.
-    Right panel: rendered text with a 16x16 patch grid, matching PIXEL's ViT input.
+    Right panel: rendered text with a 16x16 patch grid, matching PIXEL's patch-based layout.
 
     We start with a misspelling example from Wikipedia's
     [commonly misspelled English words](https://en.wikipedia.org/wiki/Commonly_misspelled_English_words):
@@ -175,7 +178,7 @@ def _(mo):
 
 
 @app.cell
-def _(BertTokenizer, PangoCairoTextRenderer, asset_source, font_path, mo, vocab_path):
+def _(BertTokenizer, SimplePixelRenderer, asset_source, font_path, mo, vocab_path):
     tokenizer_name = "bert-base-cased (bundled vocab)"
     if not vocab_path.exists():
         raise FileNotFoundError(
@@ -187,11 +190,10 @@ def _(BertTokenizer, PangoCairoTextRenderer, asset_source, font_path, mo, vocab_
 
     if not font_path.exists():
         raise FileNotFoundError(
-            "Could not locate GoNotoCurrent.ttf. Expected at "
-            "pixel/configs/renderers/noto_renderer/GoNotoCurrent.ttf relative to the notebook."
+            "Could not locate GoNotoCurrent.ttf for the notebook renderer."
         )
 
-    renderer = PangoCairoTextRenderer(font_file=str(font_path), rgb=False)
+    renderer = SimplePixelRenderer(font_file=str(font_path))
 
     status = mo.callout(
         mo.md(
@@ -202,6 +204,7 @@ def _(BertTokenizer, PangoCairoTextRenderer, asset_source, font_path, mo, vocab_
             - Bundled tokenizer vocab: {vocab_path.name}
             - PIXEL font file: {font_path.name}
             - Asset source: {asset_source}
+            - Renderer: Pillow patch-grid approximation
             - Patch size: {renderer.pixels_per_patch} x {renderer.pixels_per_patch} pixels
             """
         ),
