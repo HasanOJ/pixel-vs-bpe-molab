@@ -52,6 +52,10 @@ def _():
     local_pixel_package = notebook_root / "pixel" / "src" / "pixel"
 
     if local_pixel_package.exists():
+        for module_name in list(sys.modules):
+            if module_name == "pixel" or module_name.startswith("pixel."):
+                del sys.modules[module_name]
+
         namespace_paths = {
             "pixel": local_pixel_package,
             "pixel.data": local_pixel_package / "data",
@@ -59,10 +63,9 @@ def _():
             "pixel.utils": local_pixel_package / "utils",
         }
         for module_name, module_path in namespace_paths.items():
-            if module_name not in sys.modules:
-                namespace_module = types.ModuleType(module_name)
-                namespace_module.__path__ = [str(module_path)]
-                sys.modules[module_name] = namespace_module
+            namespace_module = types.ModuleType(module_name)
+            namespace_module.__path__ = [str(module_path)]
+            sys.modules[module_name] = namespace_module
 
     from pixel.data.rendering.pangocairo_renderer import PangoCairoTextRenderer
     from transformers import BertTokenizer
